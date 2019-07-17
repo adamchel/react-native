@@ -17,11 +17,11 @@ const EVENT_SOURCE_EVENTS = [
   'error',
   'message',
   'open',
+  'debug',
 ];
 
 // char codes
 const bom = [239, 187, 191]; // byte order mark
-const space = 32;
 const lf = 10;
 const cr = 13;
 
@@ -39,7 +39,7 @@ class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
   onerror: ?Function;
   onmessage: ?Function;
   onopen: ?Function;
-
+  ondebug: ?Function;
   
   // Buffers for event stream parsing
   _isFirstChunk = false;
@@ -74,6 +74,7 @@ class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
     if (!url) {
       throw new Error('Cannot open an SSE stream on an empty url');
     }
+    this.url = url;
 
     let headers: Object = { 'Cache-Control': 'no-store', 'Accept': 'text/event-stream' };
     if (this._lastEventId) headers['Last-Event-ID'] = this._lastEventId;
@@ -92,36 +93,21 @@ class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
           }
         }
       } 
-      
 
       if (eventSourceInitDict.withCredentials) {
         this.withCredentials = eventSourceInitDict.withCredentials;
       }
     }
 
-    this._subscriptions.push(
-      RCTNetworking.addListener('didSendNetworkData', args =>
-        this.__didUploadProgress(...args),
-      ),
-    );
+    this._subscriptions = [];
     this._subscriptions.push(
       RCTNetworking.addListener('didReceiveNetworkResponse', args =>
         this.__didReceiveResponse(...args),
       ),
     );
     this._subscriptions.push(
-      RCTNetworking.addListener('didReceiveNetworkData', args =>
-        this.__didReceiveData(...args),
-      ),
-    );
-    this._subscriptions.push(
       RCTNetworking.addListener('didReceiveNetworkIncrementalData', args =>
         this.__didReceiveIncrementalData(...args),
-      ),
-    );
-    this._subscriptions.push(
-      RCTNetworking.addListener('didReceiveNetworkDataProgress', args =>
-        this.__didReceiveDataProgress(...args),
       ),
     );
     this._subscriptions.push(
@@ -131,7 +117,7 @@ class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
     );
 
     RCTNetworking.sendRequest(
-      "GET",
+      "GET", // EventSource always GETs the resource
       this._trackingName,
       this.url,
       headers,
@@ -142,10 +128,10 @@ class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
       this.__didCreateRequest.bind(this),
       this.withCredentials,
     );
-
   }
 
   close(): void {
+    this.dispatchEvent({type: 'debug', message: 'closing the event source'})
     if (this._requestId !== null && this._requestId !== undefined) {
       RCTNetworking.abortRequest(this._requestId);
     }
@@ -174,38 +160,35 @@ class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
     while (pos < chunk.length) {
       if (this._discardNextLineFeed) {
         if (chunk.charCodeAt(pos) === lf) {
-          // Start the chunk at the beginning of the next line
-          chunk = chunk.slice(pos + 1);
-          pos = 0;
+          // Ignore this line
+          ++pos;
         }
         this._discardNextLineFeed = false;
       }
 
       const curCharCode = chunk.charCodeAt(pos);
       if (curCharCode === cr || curCharCode === lf) {
-        this._lineBuf += chunk.slice(0, pos);
         this.__processEventStreamLine();
-
-        // Start the chunk at the beginning of the next line
-        chunk = chunk.slice(pos + 1);
-        pos = 0;
 
         // Treat CRLF properly
         if (curCharCode === cr) {
           this._discardNextLineFeed = true;
         }
+      } else {
+          this._lineBuf += chunk.charAt(pos);
       }
-    }
 
-    // If there is any data remaining in the chunk, append it to the line buffer.
-    if (chunk) {
-      this._lineBuf += chunk;
+      ++pos;
     }
   }
 
   __processEventStreamLine(): void {
-    let curPos = 0;
     const line = this._lineBuf;
+
+    // clear the line buffer
+    this._lineBuf = "";
+
+    this.dispatchEvent({type: 'debug', message: `processing line: "${line}"`})
 
     // Dispatch the buffered event if this is an empty line
     if (line === '') {
@@ -241,7 +224,7 @@ class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
       // this is a comment line and should be ignored
       return;
     } else if (colonPos > 0) {
-      if (line[colonPos + 1] == ' ') {
+      if (line[colonPos + 1] == " ") {
         field = line.slice(0, colonPos);
         value = line.slice(colonPos + 2); // ignores the first space from the value
       } else {
@@ -289,6 +272,7 @@ class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
     responseHeaders: ?Object,
     responseURL: ?string,
   ): void {
+    this.dispatchEvent({ type: 'debug', message: `request ${requestId} didReceiveResponse: ${status}`});
     if (requestId === this._requestId) {
       // Handle HTTP 5XX errors
       if (status === 500 || status === 502 || status === 503 || status === 504) {
@@ -305,12 +289,19 @@ class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
       }
 
       if (status !== 200) {
-        this.dispatchEvent({type: 'error', message: "HTTP error" + status});
+        this.dispatchEvent({type: 'error', message: "HTTP error " + status});
         return this.close();
       }
 
-      if (responseHeaders && responseHeaders["Content-Type"] !== "text/event-stream") {
-        this.dispatchEvent({type: 'error', message: "unsupported MIME type in response"});
+      // make the header names case insensitive
+      for (const entry of Object.entries(responseHeaders)) {
+          const [key, value] = entry;
+          delete responseHeaders[key];
+          responseHeaders[key.toLowerCase()] = value;
+      }
+
+      if (responseHeaders && responseHeaders["content-type"] !== "text/event-stream") {
+        this.dispatchEvent({type: 'error', message: "unsupported MIME type in response" + JSON.stringify(responseHeaders)});
         return this.close();  
       }
 
@@ -319,20 +310,13 @@ class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
     }
   }
 
-  __didReceiveData(requestId: number, response: string): void {
-    if (requestId !== this._requestId) {
-      return;
-    }
-
-    console.log("__didReceiveData DOES NOT NEED TO BE HANDLED!!!!");
-  }
-
   __didReceiveIncrementalData(
     requestId: number,
     responseText: string,
     progress: number,
     total: number,
   ) {
+    this.dispatchEvent({type: 'debug', message: `request ${requestId} didReceiveIncrementalData: ${responseText}, progress ${progress}, total ${total}`});
     if (requestId !== this._requestId) {
       return;
     }
@@ -340,28 +324,16 @@ class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
     this.__processEventStreamChunk(responseText);
   }
 
-  __didReceiveDataProgress(
-    requestId: number,
-    loaded: number,
-    total: number,
-  ): void {
-    if (requestId !== this._requestId) {
-      return;
-    }
-
-    console.log("__didReceiveDataProgress DOES NOT NEED TO BE HANDLED!!!!");
-  }
-
   __didCompleteResponse(
     requestId: number,
     error: string,
     timeOutError: boolean,
   ): void {
+    this.dispatchEvent({type: 'debug', message: `request ${requestId} didCompleteResponse: ${error}, timeoutError ${timeOutError}`});
     if (requestId === this._requestId) {
-      console.log("__didCompleteResponse DOES NOT NEED TO BE HANDLED!!!!");
+      // TODO: handle error where request never makes it out the door
     }
   }
-
 }
 
 module.exports = EventSource;
