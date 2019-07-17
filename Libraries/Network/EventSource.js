@@ -25,6 +25,13 @@ const bom = [239, 187, 191]; // byte order mark
 const lf = 10;
 const cr = 13;
 
+/**
+ * An RCTNetworking-based implementation of the EventSource web standard.
+ * 
+ * See https://developer.mozilla.org/en-US/docs/Web/API/EventSource
+ *     https://html.spec.whatwg.org/multipage/server-sent-events.html
+ *     https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events
+ */
 class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
   static CONNECTING: number = 0;
   static OPEN: number = 1;
@@ -135,7 +142,8 @@ class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
     if (this._requestId !== null && this._requestId !== undefined) {
       RCTNetworking.abortRequest(this._requestId);
     }
-    // Clear RCTNetworking subscriptions
+
+    // clean up RCTNetworking subscriptions
     (this._subscriptions || []).forEach(sub => {
       if (sub) {
         sub.remove();
@@ -146,7 +154,8 @@ class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
     this.readyState = EventSource.CLOSED;
   }
 
-  
+  // Internal buffer processing methods
+
   __processEventStreamChunk(chunk: string): void {
     if (this._isFirstChunk) {
       if (bom.every((charCode, idx) => { return this._lineBuf.charCodeAt(idx) === charCode; })) {
@@ -160,7 +169,7 @@ class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
     while (pos < chunk.length) {
       if (this._discardNextLineFeed) {
         if (chunk.charCodeAt(pos) === lf) {
-          // Ignore this line
+          // Ignore this LF since it was preceded by a CR
           ++pos;
         }
         this._discardNextLineFeed = false;
@@ -192,27 +201,8 @@ class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
 
     // Dispatch the buffered event if this is an empty line
     if (line === '') {
-      this._lastEventId = this._lastEventIdBuf;
-
-      // If the data buffer is an empty string, set the event type buffer to
-      // empty string and return
-      if (this._dataBuf === "") {
-        this._eventTypeBuf = "";
-        return;
-      }
-
-      // Dispatch the event
-      const eventType = this._eventTypeBuf || 'message';
-      this.dispatchEvent({
-        type: eventType,
-        data: this._dataBuf.slice(0, -1), // remove the trailing line feed
-        origin: this.url,
-        lastEventId: this._lastEventId,
-      });
-
-      // Reset the data and event type buffers
-      this._dataBuf = "";
-      this._eventTypeBuf = "";
+      this.__dispatchBufferedEvent();
+      return;
     }
 
     const colonPos = line.indexOf(':');
@@ -261,6 +251,32 @@ class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
         // this is an unrecognized field, so this line should be ignored
     }
   }
+
+  __dispatchBufferedEvent() {
+    this._lastEventId = this._lastEventIdBuf;
+
+    // If the data buffer is an empty string, set the event type buffer to
+    // empty string and return
+    if (this._dataBuf === "") {
+      this._eventTypeBuf = "";
+      return;
+    }
+
+    // Dispatch the event
+    const eventType = this._eventTypeBuf || 'message';
+    this.dispatchEvent({
+      type: eventType,
+      data: this._dataBuf.slice(0, -1), // remove the trailing LF from the data
+      origin: this.url,
+      lastEventId: this._lastEventId,
+    });
+
+    // Reset the data and event type buffers
+    this._dataBuf = "";
+    this._eventTypeBuf = "";
+  }
+
+  // RCTNetworking callbacks
 
   __didCreateRequest(requestId: number): void {
     this._requestId = requestId;
