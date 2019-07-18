@@ -17,7 +17,6 @@ const EVENT_SOURCE_EVENTS = [
   'error',
   'message',
   'open',
-  'debug',
 ];
 
 // char codes
@@ -46,7 +45,6 @@ class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
   onerror: ?Function;
   onmessage: ?Function;
   onopen: ?Function;
-  ondebug: ?Function;
   
   // Buffers for event stream parsing
   _isFirstChunk = false;
@@ -238,12 +236,12 @@ class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
         break;
       case "id":
         // Update the last seen event id
-        this._lastEventIdBuf = field;
+        this._lastEventIdBuf = value;
         break;
       case "retry":
         // Set a new reconnect interval value
         const newRetryMs = parseInt(value, 10);
-        if (newRetryMs != NaN) {
+        if (!isNaN(newRetryMs)) {
           this._reconnectIntervalMs = newRetryMs;
         }
         break;
@@ -276,7 +274,7 @@ class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
     this._eventTypeBuf = "";
   }
 
-  // RCTNetworking callbacks
+  // RCTNetworking callbacks, exposed for testing
 
   __didCreateRequest(requestId: number): void {
     this._requestId = requestId;
@@ -288,42 +286,42 @@ class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
     responseHeaders: ?Object,
     responseURL: ?string,
   ): void {
-    this.dispatchEvent({ type: 'debug', message: `request ${requestId} didReceiveResponse: ${status}`});
-    if (requestId === this._requestId) {
-      // Handle HTTP 5XX errors
-      if (status === 500 || status === 502 || status === 503 || status === 504) {
-        // TODO: abort connection
-        this.dispatchEvent({type: 'error', message: "HTTP error" + status});
-        return;
-      }
-
-      // Handle redirects
-      if (status === 301 || status === 307) {
-        // TODO: handle redirect
-        this.dispatchEvent({type: 'error', message: "redirect not supported"});
-        return
-      }
-
-      if (status !== 200) {
-        this.dispatchEvent({type: 'error', message: "HTTP error " + status});
-        return this.close();
-      }
-
-      // make the header names case insensitive
-      for (const entry of Object.entries(responseHeaders)) {
-          const [key, value] = entry;
-          delete responseHeaders[key];
-          responseHeaders[key.toLowerCase()] = value;
-      }
-
-      if (responseHeaders && responseHeaders["content-type"] !== "text/event-stream") {
-        this.dispatchEvent({type: 'error', message: "unsupported MIME type in response" + JSON.stringify(responseHeaders)});
-        return this.close();  
-      }
-
-      this.readyState = this.OPEN;
-      this.dispatchEvent({type: 'open'});
+    if (requestId !== this._requestId) {
+      return;
     }
+
+    // Handle HTTP 5XX errors
+    if (status === 500 || status === 502 || status === 503 || status === 504) {
+      this.dispatchEvent({type: 'error', message: "HTTP error" + status});
+      return this.close();
+    }
+
+    // Handle redirects
+    if (status === 301 || status === 307) {
+      // TODO: handle redirect
+      this.dispatchEvent({type: 'error', message: "redirect not supported"});
+      return
+    }
+
+    if (status !== 200) {
+      this.dispatchEvent({type: 'error', message: "unexpected HTTP status " + status});
+      return this.close();
+    }
+
+    // make the header names case insensitive
+    for (const entry of Object.entries(responseHeaders)) {
+        const [key, value] = entry;
+        delete responseHeaders[key];
+        responseHeaders[key.toLowerCase()] = value;
+    }
+
+    if (responseHeaders && responseHeaders["content-type"] !== "text/event-stream") {
+      this.dispatchEvent({type: 'error', message: "unsupported MIME type in response" + JSON.stringify(responseHeaders)});
+      return this.close();
+    }
+
+    this.readyState = EventSource.OPEN;
+    this.dispatchEvent({type: 'open'});
   }
 
   __didReceiveIncrementalData(
@@ -332,7 +330,6 @@ class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
     progress: number,
     total: number,
   ) {
-    this.dispatchEvent({type: 'debug', message: `request ${requestId} didReceiveIncrementalData: ${responseText}, progress ${progress}, total ${total}`});
     if (requestId !== this._requestId) {
       return;
     }
@@ -345,9 +342,15 @@ class EventSource extends EventTarget(...EVENT_SOURCE_EVENTS) {
     error: string,
     timeOutError: boolean,
   ): void {
-    this.dispatchEvent({type: 'debug', message: `request ${requestId} didCompleteResponse: ${error}, timeoutError ${timeOutError}`});
-    if (requestId === this._requestId) {
-      // TODO: handle error where request never makes it out the door
+    if (requestId !== this._requestId) {
+      return;
+    }
+
+    if (error) {
+      this.dispatchEvent({
+        type: 'error', message: 'could not complete request: ' + error
+      });
+      this.close();
     }
   }
 }
